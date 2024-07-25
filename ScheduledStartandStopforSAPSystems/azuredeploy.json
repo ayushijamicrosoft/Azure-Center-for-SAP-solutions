@@ -1,823 +1,1102 @@
 {
-  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
-  "contentVersion": "1.0.0.0",
-  "parameters": {
-    "location": {
-      "type": "string",
-      "defaultValue": "[resourceGroup().location]",
-      "metadata": {
-        "description": "Location for all resources."
-      }
-    },
-    "LogicAppName": {
-      "type": "string",
-      "minLength": 1,
-      "metadata": {
-        "description": "The name of the logic app that creates start/stop schedule."
-      }
-    },
-    "SAPOperationType": {
-      "allowedValues": ["start", "stop"],
-      "type": "string",
-      "metadata": {
-        "allowedValues": ["start", "stop"],
-        "description": "Operation to be performed on SAP resource.",
-        "displayName": "SAP operation type",
-        "required": true
-      }
-    },
-    "IncludeDatabaseOperations": {
-      "type": "bool",
-      "metadata": {
-        "description": "Start/Stop the Database Instance",
-        "displayName": "Include Database instance",
-        "required": false
-      }
-    },
-    "IncludeVirtualMachineOperation": {
-      "type": "bool",
-      "metadata": {
-        "description": "Start/Stop the virtual machines",
-        "displayName": "Include virtual machines operation",
-        "required": true
-      }
-    },
-    "OperationExecution": {
-      "type": "string",
-      "metadata": {
-        "description": "Perform operations in sequence",
-        "displayName": "Perform operations in sequence",
-        "required": true
-      }
-    },
-    "SoftStopTimeout": {
-      "type": "int",
-      "defaultValue": 0,
-      "metadata": {
-        "required": false,
-        "displayName": "Soft stop timeout (in seconds)",
-        "description": "Soft stop timeout value, if this value is 0, hard stop will be triggered"
-      }
-    },
-    "VirtualInstanceForSAPSolutionsResourceID": {
-      "type": "array",
-      "metadata": {
-        "displayName": "Virtual Instance for SAP solutions Resource ID(s)",
-        "required": true
-      }
-    },
-    "Frequency": {
-      "allowedValues": ["Month", "Week", "Day"],
-      "type": "string",
-      "metadata": {
-        "allowedValues": ["Month", "Week", "Day"],
-        "description": "How often should schedule run. i.e. Weekly",
-        "displayName": "Frequency",
-        "placeholder": "How often does schedule run",
-        "required": false
-      }
-    },
-    "Interval": {
-      "type": "int"
-    },
-    "OnTheseDays": {
-      "type": "array",
-      "defaultValue": [],
-      "metadata": {
-        "description": "Remove the days in a week you want to skip the opeartion",
-        "required": false,
-        "displayName": "On these days"
-      }
-    },
-    "AtTheseHours": {
-      "type": "array",
-      "defaultValue": ["00"],
-      "metadata": {
-        "required": false,
-        "displayName": "At these hours"
-      }
-    },
-    "AtThisMinutes": {
-      "type": "array",
-      "defaultValue": ["0"],
-      "metadata": {
-        "required": false,
-        "displayName": "At these minutes"
-      }
-    },
-    "StartTime": {
-      "type": "string",
-      "metadata": {
-        "description": "Select start time to Power On SAP system",
-        "displayName": "Start Time",
-        "format": "timeFormat",
-        "required": false
-      }
-    },
-    "TimeZone": {
-      "type": "string",
-      "metadata": {
-        "description": "Select time zone for task schedule",
-        "displayName": "Time zone",
-        "placeholder": "Select time zone for task schedule",
-        "required": true
-      }
-    },
-    "ManagedIdentityId": {
-      "type": "string",
-      "metadata": {
-        "description": "Managed Identity Id",
-        "displayName": "Managed Identity Id",
-        "required": true
-      }
-    }
-  },
-  "variables": {
-    "armConnectionName": "[concat('sapops-arm-',uniqueString(deployment().name))]",
-    "logicAppAlertName": "[toLower( concat( parameters('LogicAppName'), '-logicappalert-', uniqueString(deployment().name) ) )]",
-    "actionGroupName": "[toLower( concat( 'sapops-', uniqueString(deployment().name) ) )]",
-    "visAlertName": "[toLower( concat( 'sapops-visalert-', uniqueString(deployment().name) ) )]",
-    "defaultAtTheseHours": ["0"],
-    "dailySchedule": {
-      "Recurrence": {
-        "recurrence": {
-          "frequency": "[parameters('Frequency')]",
-          "interval": "[parameters('Interval')]",
-          "startTime": "[parameters('StartTime')]",
-          "schedule": {
-            "hours": "[if(equals(length(parameters('AtTheseHours')), 0), json(string(variables('defaultAtTheseHours'))), parameters('AtTheseHours'))]",
-            "minutes": "[parameters('AtThisMinutes')]"
-          },
-          "timeZone": "[parameters('TimeZone')]"
-        },
-        "type": "Recurrence"
-      }
-    },
-    "weeklySchedule": {
-      "Recurrence": {
-        "recurrence": {
-          "frequency": "[parameters('Frequency')]",
-          "interval": "[parameters('Interval')]",
-          "startTime": "[parameters('StartTime')]",
-          "schedule": {
-            "weekDays": "[parameters('OnTheseDays')]",
-            "hours": "[if(equals(length(parameters('AtTheseHours')), 0), json(string(variables('defaultAtTheseHours'))), parameters('AtTheseHours'))]",
-            "minutes": "[parameters('AtThisMinutes')]"
-          },
-          "timeZone": "[parameters('TimeZone')]"
-        },
-        "type": "Recurrence"
-      }
-    },
-    "monthlySchedule": {
-      "Recurrence": {
-        "recurrence": {
-          "frequency": "[parameters('Frequency')]",
-          "interval": "[parameters('Interval')]",
-          "startTime": "[parameters('StartTime')]",
-          "timeZone": "[parameters('TimeZone')]"
-        },
-        "type": "Recurrence"
-      }
-    },
-    "otherSchedule": "[if(equals(parameters('Frequency'), 'Week'), variables('weeklySchedule'), variables('dailySchedule'))]",
-    "sequentialOperations": {
-      "concurrency": {
-        "repetitions": 1
-      }
-    },
-    "concurrentOperations": {
-      "concurrency": {
-        "repetitions": 20
-      }
-    }
-  },
-  "resources": [
-    {
-      "name": "[parameters('LogicAppName')]",
-      "type": "Microsoft.Logic/workflows",
-      "location": "[resourceGroup().location]",
-      "apiVersion": "2019-05-01",
-      "dependsOn": [
-        "[resourceId('Microsoft.Web/connections', variables('armConnectionName'))]"
-      ],
-      "identity": {
-        "type": "UserAssigned",
-        "userAssignedIdentities": {
-          "[parameters('ManagedIdentityId')]": {}
-        }
-      },
-      "properties": {
-        "state": "Enabled",
-        "definition": {
-          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
-          "contentVersion": "1.0.0.0",
-          "parameters": {
-            "$connections": {
-              "defaultValue": {},
-              "type": "Object"
-            },
-            "ResourceName": {
-              "defaultValue": "[parameters('VirtualInstanceForSAPsolutionsResourceID')]",
-              "type": "array"
-            },
-            "OperationName": {
-              "defaultValue": "[parameters('SAPOperationType')]",
-              "type": "string"
-            },
-            "SoftStopTimeout": {
-              "defaultValue": "[parameters('SoftStopTimeout')]",
-              "type": "int"
-            },
-            "IncludeDatabaseOperations": {
-              "defaultValue": "[parameters('IncludeDatabaseOperations')]",
-              "type": "bool"
-            },
-            "IncludeVirtualMachineOperation": {
-              "defaultValue": "[parameters('IncludeVirtualMachineOperation')]",
-              "type": "bool"
-            }
-          },
-          "triggers": "[if(equals(parameters('Frequency'), 'Month'), variables('monthlySchedule'), variables('otherSchedule'))]",
-          "actions": {
-            "SAP_operation_type": {
+  "definition": {
+      "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+      "actions": {
+          "Check_if_Infra_Stop_Operation": {
               "actions": {
-                "For_each_VIS_resource_start": {
-                  "actions": {
-                    "Database_start_operation": {
+                  "For_each_VIS_resource_stop_VM": {
                       "actions": {
-                        "For_each_DB_instance_start": {
-                          "actions": {
-                            "Initiate_database_instance_start": {
-                              "inputs": {
-                                "body": {
-                                  "startVm": "@parameters('IncludeVirtualMachineOperation')"
-                                },
-                                "host": {
-                                  "connection": {
-                                    "name": "@parameters('$connections')['arm']['connectionId']"
-                                  }
-                                },
-                                "method": "post",
-                                "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_start'), '/')[8],'/databaseinstances/',items('For_each_DB_instance_start')?['name'])}/@{encodeURIComponent(parameters('OperationName'))}",
-                                "queries": {
-                                  "x-ms-api-version": "2023-10-01-preview"
-                                }
-                              },
-                              "runAfter": {},
-                              "type": "ApiConnection"
-                            }
-                          },
-                          "foreach": "@body('Parse_database_instance_start_operation_response')?['value']",
-                          "runAfter": {
-                            "Parse_database_instance_start_operation_response": [
-                              "Succeeded"
-                            ]
-                          },
-                          "type": "Foreach"
-                        },
-                        "Parse_database_instance_start_operation_response": {
-                          "inputs": {
-                            "content": "@body('Read_database_instance_start_operation_response')",
-                            "schema": {
-                              "properties": {
-                                "value": {
-                                  "items": {
-                                    "properties": {
-                                      "id": {
-                                        "type": "string"
-                                      },
-                                      "location": {
-                                        "type": "string"
-                                      },
-                                      "name": {
-                                        "type": "string"
-                                      },
-                                      "properties": {
-                                        "properties": {
-                                          "databaseSid": {
-                                            "type": "string"
-                                          },
-                                          "databaseType": {
-                                            "type": "string"
-                                          },
-                                          "ipAddress": {
-                                            "type": "string"
-                                          },
-                                          "loadBalancerDetails": {
-                                            "properties": {
-                                              "id": {
-                                                "type": "string"
-                                              }
-                                            },
-                                            "type": "object"
-                                          },
-                                          "provisioningState": {
-                                            "type": "string"
-                                          },
-                                          "status": {
-                                            "type": "string"
-                                          },
-                                          "subnet": {
-                                            "type": "string"
-                                          },
-                                          "vmDetails": {
-                                            "items": {
-                                              "properties": {
-                                                "status": {
-                                                  "type": "string"
-                                                },
-                                                "virtualMachineId": {
-                                                  "type": "string"
-                                                }
-                                              },
-                                              "required": [
-                                                "virtualMachineId",
-                                                "status"
-                                              ],
-                                              "type": "object"
-                                            },
-                                            "type": "array"
-                                          }
-                                        },
-                                        "type": "object"
-                                      },
-                                      "systemData": {
-                                        "properties": {
-                                          "createdAt": {
-                                            "type": "string"
-                                          },
-                                          "createdBy": {
-                                            "type": "string"
-                                          },
-                                          "createdByType": {
-                                            "type": "string"
-                                          },
-                                          "lastModifiedAt": {
-                                            "type": "string"
-                                          },
-                                          "lastModifiedBy": {
-                                            "type": "string"
-                                          },
-                                          "lastModifiedByType": {
-                                            "type": "string"
-                                          }
-                                        },
-                                        "type": "object"
-                                      },
-                                      "tags": {
-                                        "type": "object"
-                                      },
-                                      "type": {
-                                        "type": "string"
-                                      }
-                                    },
-                                    "required": [
-                                      "id",
-                                      "name",
-                                      "type",
-                                      "location",
-                                      "systemData",
-                                      "properties"
-                                    ],
-                                    "type": "object"
-                                  },
-                                  "type": "array"
-                                }
-                              },
-                              "type": "object"
-                            }
-                          },
-                          "runAfter": {
-                            "Read_database_instance_start_operation_response": [
-                              "Succeeded"
-                            ]
-                          },
-                          "type": "ParseJson"
-                        },
-                        "Read_database_instance_start_operation_response": {
-                          "inputs": {
-                            "host": {
-                              "connection": {
-                                "name": "@parameters('$connections')['arm']['connectionId']"
-                              }
-                            },
-                            "method": "get",
-                            "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_start'), '/')[8],'/databaseInstances')}",
-                            "queries": {
-                              "x-ms-api-version": "2023-10-01-preview"
-                            }
-                          },
-                          "runAfter": {},
-                          "type": "ApiConnection"
-                        }
-                      },
-                      "expression": {
-                        "and": [
-                          {
-                            "equals": [
-                              "@parameters('IncludeDatabaseOperations')",
-                              true
-                            ]
-                          }
-                        ]
-                      },
-                      "runAfter": {},
-                      "type": "If"
-                    },
-                    "Initiate_VIS_resource_start": {
-                      "inputs": {
-                        "body": {
-                          "startVm": "@parameters('IncludeVirtualMachineOperation')"
-                        },
-                        "host": {
-                          "connection": {
-                            "name": "@parameters('$connections')['arm']['connectionId']"
-                          }
-                        },
-                        "method": "post",
-                        "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_start'), '/')[8])}/@{encodeURIComponent(parameters('OperationName'))}",
-                        "queries": {
-                          "x-ms-api-version": "2023-10-01-preview"
-                        }
-                      },
-                      "runAfter": {
-                        "Database_start_operation": ["Succeeded"]
-                      },
-                      "type": "ApiConnection"
-                    }
-                  },
-                  "foreach": "@parameters('ResourceName')",
-                  "runAfter": {},
-                  "type": "Foreach",
-                  "runtimeConfiguration": "[if(equals(parameters('OperationExecution'), 'sequence'), variables('sequentialOperations'), variables('concurrentOperations'))]"
-                }
-              },
-              "else": {
-                "actions": {
-                  "For_each_VIS_resource_stop": {
-                    "actions": {
-                      "Database_stop_operation": {
-                        "actions": {
-                          "For_each_DB_instance_stop": {
-                            "actions": {
-                              "Initiate_database_instance_stop": {
-                                "inputs": {
-                                  "body": {
-                                    "softStopTimeoutSeconds": "@parameters('SoftStopTimeout')",
-                                    "deallocateVm": "@parameters('IncludeVirtualMachineOperation')"
-                                  },
-                                  "host": {
-                                    "connection": {
-                                      "name": "@parameters('$connections')['arm']['connectionId']"
-                                    }
-                                  },
-                                  "method": "post",
-                                  "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop'), '/')[8],'/databaseinstances/',items('For_each_DB_instance_stop')?['name'])}/@{encodeURIComponent(parameters('OperationName'))}",
-                                  "queries": {
-                                    "x-ms-api-version": "2023-10-01-preview"
-                                  }
-                                },
-                                "runAfter": {},
-                                "type": "ApiConnection"
-                              }
-                            },
-                            "foreach": "@body('Parse_database_instance_stop_operation_response')?['value']",
-                            "runAfter": {
-                              "Parse_database_instance_stop_operation_response": [
-                                "Succeeded"
-                              ]
-                            },
-                            "type": "Foreach"
-                          },
-                          "Parse_database_instance_stop_operation_response": {
-                            "inputs": {
-                              "content": "@body('Read_database_instance_stop_operation_response')",
-                              "schema": {
-                                "properties": {
-                                  "value": {
-                                    "items": {
-                                      "properties": {
-                                        "id": {
-                                          "type": "string"
-                                        },
-                                        "location": {
-                                          "type": "string"
-                                        },
-                                        "name": {
-                                          "type": "string"
-                                        },
-                                        "properties": {
-                                          "properties": {
-                                            "databaseSid": {
-                                              "type": "string"
-                                            },
-                                            "databaseType": {
-                                              "type": "string"
-                                            },
-                                            "ipAddress": {
-                                              "type": "string"
-                                            },
-                                            "loadBalancerDetails": {
-                                              "properties": {
-                                                "id": {
-                                                  "type": "string"
-                                                }
-                                              },
-                                              "type": "object"
-                                            },
-                                            "provisioningState": {
-                                              "type": "string"
-                                            },
-                                            "status": {
-                                              "type": "string"
-                                            },
-                                            "subnet": {
-                                              "type": "string"
-                                            },
-                                            "vmDetails": {
-                                              "items": {
-                                                "properties": {
-                                                  "status": {
-                                                    "type": "string"
-                                                  },
-                                                  "virtualMachineId": {
-                                                    "type": "string"
+                          "Database_Operations_set_to_true": {
+                              "actions": {
+                                  "For_every_database_instance": {
+                                      "actions": {
+                                          "For_every_database_instance_VMs": {
+                                              "actions": {
+                                                  "For_each_virtual_machine_list": {
+                                                      "actions": {
+                                                          "Deallocate_virtual_machine": {
+                                                              "inputs": {
+                                                                  "host": {
+                                                                      "connection": {
+                                                                          "name": "@parameters('$connections')['azurevm']['connectionId']"
+                                                                      }
+                                                                  },
+                                                                  "method": "post",
+                                                                  "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_virtual_machine_list')['virtualMachineId'], '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_virtual_machine_list')['virtualMachineId'], '/')[4])}/providers/Microsoft.Compute/virtualMachines/@{encodeURIComponent(split(items('For_each_virtual_machine_list')['virtualMachineId'], '/')[8])}/deallocate",
+                                                                  "queries": {
+                                                                      "api-version": "2019-12-01"
+                                                                  }
+                                                              },
+                                                              "type": "ApiConnection"
+                                                          }
+                                                      },
+                                                      "foreach": "@items('For_every_database_instance_VMs')?['properties']?['vmDetails']",
+                                                      "type": "Foreach"
                                                   }
-                                                },
-                                                "required": [
-                                                  "virtualMachineId",
-                                                  "status"
-                                                ],
-                                                "type": "object"
+                                              },
+                                              "foreach": "@items('For_every_database_instance')['value']",
+                                              "type": "Foreach"
+                                          }
+                                      },
+                                      "foreach": "@outputs('Parse_database_instance_information')['body']",
+                                      "runAfter": {
+                                          "Parse_database_instance_information": [
+                                              "Succeeded"
+                                          ]
+                                      },
+                                      "type": "Foreach"
+                                  },
+                                  "Get_Database_Instances_of_the_VIS": {
+                                      "inputs": {
+                                          "host": {
+                                              "connection": {
+                                                  "name": "@parameters('$connections')['arm']['connectionId']"
+                                              }
+                                          },
+                                          "method": "get",
+                                          "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop_VM'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop_VM'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop_VM'), '/')[8],'/databaseInstances')}",
+                                          "queries": {
+                                              "x-ms-api-version": "2023-10-01-preview"
+                                          }
+                                      },
+                                      "type": "ApiConnection"
+                                  },
+                                  "Parse_database_instance_information": {
+                                      "inputs": {
+                                          "content": "@body('Read_database_instance_stop_operation_response')",
+                                          "schema": {
+                                              "items": {
+                                                  "properties": {
+                                                      "value": {
+                                                          "items": {
+                                                              "properties": {
+                                                                  "id": {
+                                                                      "type": "string"
+                                                                  },
+                                                                  "location": {
+                                                                      "type": "string"
+                                                                  },
+                                                                  "name": {
+                                                                      "type": "string"
+                                                                  },
+                                                                  "properties": {
+                                                                      "properties": {
+                                                                          "databaseSid": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "databaseType": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "ipAddress": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "subnet": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "vmDetails": {
+                                                                              "items": {
+                                                                                  "properties": {
+                                                                                      "virtualMachineId": {
+                                                                                          "type": "string"
+                                                                                      }
+                                                                                  },
+                                                                                  "required": [
+                                                                                      "virtualMachineId"
+                                                                                  ],
+                                                                                  "type": "object"
+                                                                              },
+                                                                              "type": "array"
+                                                                          }
+                                                                      },
+                                                                      "type": "object"
+                                                                  },
+                                                                  "systemData": {
+                                                                      "properties": {
+                                                                          "createdAt": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "createdBy": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "createdByType": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "lastModifiedAt": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "lastModifiedBy": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "lastModifiedByType": {
+                                                                              "type": "string"
+                                                                          }
+                                                                      },
+                                                                      "type": "object"
+                                                                  },
+                                                                  "type": {
+                                                                      "type": "string"
+                                                                  }
+                                                              },
+                                                              "required": [
+                                                                  "id",
+                                                                  "name",
+                                                                  "type",
+                                                                  "location",
+                                                                  "systemData",
+                                                                  "properties"
+                                                              ],
+                                                              "type": "object"
+                                                          },
+                                                          "type": "array"
+                                                      }
+                                                  },
+                                                  "required": [
+                                                      "value"
+                                                  ],
+                                                  "type": "object"
                                               },
                                               "type": "array"
-                                            }
-                                          },
-                                          "type": "object"
-                                        },
-                                        "systemData": {
-                                          "properties": {
-                                            "createdAt": {
-                                              "type": "string"
-                                            },
-                                            "createdBy": {
-                                              "type": "string"
-                                            },
-                                            "createdByType": {
-                                              "type": "string"
-                                            },
-                                            "lastModifiedAt": {
-                                              "type": "string"
-                                            },
-                                            "lastModifiedBy": {
-                                              "type": "string"
-                                            },
-                                            "lastModifiedByType": {
-                                              "type": "string"
-                                            }
-                                          },
-                                          "type": "object"
-                                        },
-                                        "tags": {
-                                          "type": "object"
-                                        },
-                                        "type": {
-                                          "type": "string"
-                                        }
+                                          }
                                       },
-                                      "required": [
-                                        "id",
-                                        "name",
-                                        "type",
-                                        "location",
-                                        "systemData",
-                                        "properties"
-                                      ],
-                                      "type": "object"
-                                    },
-                                    "type": "array"
+                                      "runAfter": {
+                                          "Get_Database_Instances_of_the_VIS": [
+                                              "Succeeded"
+                                          ]
+                                      },
+                                      "type": "ParseJson"
                                   }
-                                },
-                                "type": "object"
-                              }
-                            },
-                            "runAfter": {
-                              "Read_database_instance_stop_operation_response": [
-                                "Succeeded"
-                              ]
-                            },
-                            "type": "ParseJson"
-                          },
-                          "Read_database_instance_stop_operation_response": {
-                            "inputs": {
-                              "host": {
-                                "connection": {
-                                  "name": "@parameters('$connections')['arm']['connectionId']"
-                                }
                               },
-                              "method": "get",
-                              "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop'), '/')[8],'/databaseInstances')}",
-                              "queries": {
-                                "x-ms-api-version": "2023-10-01-preview"
-                              }
-                            },
-                            "runAfter": {},
-                            "type": "ApiConnection"
+                              "else": {
+                                  "actions": {}
+                              },
+                              "expression": {
+                                  "and": [
+                                      {
+                                          "equals": [
+                                              "@parameters('IncludeDatabaseOperations')",
+                                              true
+                                          ]
+                                      }
+                                  ]
+                              },
+                              "type": "If"
+                          },
+                          "For_each_Application_Instance": {
+                              "actions": {
+                                  "For_each_app_VM": {
+                                      "actions": {
+                                          "Deallocate_app_VM": {
+                                              "inputs": {
+                                                  "host": {
+                                                      "connection": {
+                                                          "name": "@parameters('$connections')['azurevm']['connectionId']"
+                                                      }
+                                                  },
+                                                  "method": "post",
+                                                  "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_app_VM')['virtualMachineId'], '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_app_VM')['virtualMachineId'], '/')[4])}/providers/Microsoft.Compute/virtualMachines/@{encodeURIComponent(split(items('For_each_app_VM')['virtualMachineId'], '/')[8])}/deallocate",
+                                                  "queries": {
+                                                      "api-version": "2019-12-01"
+                                                  }
+                                              },
+                                              "type": "ApiConnection"
+                                          }
+                                      },
+                                      "foreach": "@item()?['properties']?['vmDetails']",
+                                      "type": "Foreach"
+                                  }
+                              },
+                              "foreach": "@outputs('Parse_App_Instance_Information')?['body']?['value']",
+                              "runAfter": {
+                                  "Parse_App_Instance_Information": [
+                                      "Succeeded"
+                                  ]
+                              },
+                              "type": "Foreach"
+                          },
+                          "For_each_Central_Instance": {
+                              "actions": {
+                                  "For_each_central_server_VM": {
+                                      "actions": {
+                                          "Deallocate_central_server_VM": {
+                                              "inputs": {
+                                                  "host": {
+                                                      "connection": {
+                                                          "name": "@parameters('$connections')['azurevm']['connectionId']"
+                                                      }
+                                                  },
+                                                  "method": "post",
+                                                  "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_central_server_VM')['virtualMachineId'], '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_central_server_VM')['virtualMachineId'], '/')[4])}/providers/Microsoft.Compute/virtualMachines/@{encodeURIComponent(split(items('For_each_central_server_VM')['virtualMachineId'], '/')[8])}/deallocate",
+                                                  "queries": {
+                                                      "api-version": "2019-12-01"
+                                                  }
+                                              },
+                                              "type": "ApiConnection"
+                                          }
+                                      },
+                                      "foreach": "@item()?['properties']?['vmDetails']",
+                                      "type": "Foreach"
+                                  }
+                              },
+                              "foreach": "@outputs('Parse_Central_Instance_Information')?['body']?['value']",
+                              "runAfter": {
+                                  "Parse_Central_Instance_Information": [
+                                      "Succeeded"
+                                  ]
+                              },
+                              "type": "Foreach"
+                          },
+                          "Get_App_Instances_of_the_VIS": {
+                              "inputs": {
+                                  "host": {
+                                      "connection": {
+                                          "name": "@parameters('$connections')['arm']['connectionId']"
+                                      }
+                                  },
+                                  "method": "get",
+                                  "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop_VM'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop_VM'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop_VM'), '/')[8],'/applicationInstances')}",
+                                  "queries": {
+                                      "x-ms-api-version": "2023-10-01-preview"
+                                  }
+                              },
+                              "type": "ApiConnection"
+                          },
+                          "Get_Central_Instances_of_the_VIS": {
+                              "inputs": {
+                                  "host": {
+                                      "connection": {
+                                          "name": "@parameters('$connections')['arm']['connectionId']"
+                                      }
+                                  },
+                                  "method": "get",
+                                  "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop_VM'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop_VM'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop_VM'), '/')[8],'/centralInstances')}",
+                                  "queries": {
+                                      "x-ms-api-version": "2023-10-01-preview"
+                                  }
+                              },
+                              "type": "ApiConnection"
+                          },
+                          "Parse_App_Instance_Information": {
+                              "inputs": {
+                                  "content": "@body('Get_App_Instances_of_the_VIS')",
+                                  "schema": {
+                                      "properties": {
+                                          "value": {
+                                              "items": {
+                                                  "properties": {
+                                                      "id": {
+                                                          "type": "string"
+                                                      },
+                                                      "location": {
+                                                          "type": "string"
+                                                      },
+                                                      "name": {
+                                                          "type": "string"
+                                                      },
+                                                      "properties": {
+                                                          "properties": {
+                                                              "hostname": {
+                                                                  "type": "string"
+                                                              },
+                                                              "instanceNo": {
+                                                                  "type": "string"
+                                                              },
+                                                              "ipAddress": {
+                                                                  "type": "string"
+                                                              },
+                                                              "subnet": {
+                                                                  "type": "string"
+                                                              },
+                                                              "vmDetails": {
+                                                                  "items": {
+                                                                      "properties": {
+                                                                          "virtualMachineId": {
+                                                                              "type": "string"
+                                                                          }
+                                                                      },
+                                                                      "required": [
+                                                                          "virtualMachineId"
+                                                                      ],
+                                                                      "type": "object"
+                                                                  },
+                                                                  "type": "array"
+                                                              }
+                                                          },
+                                                          "type": "object"
+                                                      },
+                                                      "systemData": {
+                                                          "properties": {
+                                                              "createdAt": {
+                                                                  "type": "string"
+                                                              },
+                                                              "createdBy": {
+                                                                  "type": "string"
+                                                              },
+                                                              "createdByType": {
+                                                                  "type": "string"
+                                                              },
+                                                              "lastModifiedAt": {
+                                                                  "type": "string"
+                                                              },
+                                                              "lastModifiedBy": {
+                                                                  "type": "string"
+                                                              },
+                                                              "lastModifiedByType": {
+                                                                  "type": "string"
+                                                              }
+                                                          },
+                                                          "type": "object"
+                                                      },
+                                                      "type": {
+                                                          "type": "string"
+                                                      }
+                                                  },
+                                                  "required": [
+                                                      "id",
+                                                      "name",
+                                                      "type",
+                                                      "location",
+                                                      "systemData",
+                                                      "properties"
+                                                  ],
+                                                  "type": "object"
+                                              },
+                                              "type": "array"
+                                          }
+                                      },
+                                      "type": "object"
+                                  }
+                              },
+                              "runAfter": {
+                                  "Get_App_Instances_of_the_VIS": [
+                                      "Succeeded"
+                                  ]
+                              },
+                              "type": "ParseJson"
+                          },
+                          "Parse_Central_Instance_Information": {
+                              "inputs": {
+                                  "content": "@body('Get_Central_Instances_of_the_VIS')",
+                                  "schema": {
+                                      "properties": {
+                                          "value": {
+                                              "items": {
+                                                  "properties": {
+                                                      "id": {
+                                                          "type": "string"
+                                                      },
+                                                      "location": {
+                                                          "type": "string"
+                                                      },
+                                                      "name": {
+                                                          "type": "string"
+                                                      },
+                                                      "properties": {
+                                                          "properties": {
+                                                              "enqueueServerProperties": {
+                                                                  "properties": {
+                                                                      "health": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "ipAddress": {
+                                                                          "type": "string"
+                                                                      }
+                                                                  },
+                                                                  "type": "object"
+                                                              },
+                                                              "gatewayServerProperties": {
+                                                                  "properties": {
+                                                                      "health": {
+                                                                          "type": "string"
+                                                                      }
+                                                                  },
+                                                                  "type": "object"
+                                                              },
+                                                              "health": {
+                                                                  "type": "string"
+                                                              },
+                                                              "instanceNo": {
+                                                                  "type": "string"
+                                                              },
+                                                              "messageServerProperties": {
+                                                                  "properties": {
+                                                                      "health": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "ipAddress": {
+                                                                          "type": "string"
+                                                                      }
+                                                                  },
+                                                                  "type": "object"
+                                                              },
+                                                              "provisioningState": {
+                                                                  "type": "string"
+                                                              },
+                                                              "status": {
+                                                                  "type": "string"
+                                                              },
+                                                              "subnet": {
+                                                                  "type": "string"
+                                                              },
+                                                              "vmDetails": {
+                                                                  "items": {
+                                                                      "properties": {
+                                                                          "virtualMachineId": {
+                                                                              "type": "string"
+                                                                          }
+                                                                      },
+                                                                      "required": [
+                                                                          "virtualMachineId"
+                                                                      ],
+                                                                      "type": "object"
+                                                                  },
+                                                                  "type": "array"
+                                                              }
+                                                          },
+                                                          "type": "object"
+                                                      },
+                                                      "systemData": {
+                                                          "properties": {
+                                                              "createdAt": {
+                                                                  "type": "string"
+                                                              },
+                                                              "createdBy": {
+                                                                  "type": "string"
+                                                              },
+                                                              "createdByType": {
+                                                                  "type": "string"
+                                                              },
+                                                              "lastModifiedAt": {
+                                                                  "type": "string"
+                                                              },
+                                                              "lastModifiedBy": {
+                                                                  "type": "string"
+                                                              },
+                                                              "lastModifiedByType": {
+                                                                  "type": "string"
+                                                              }
+                                                          },
+                                                          "type": "object"
+                                                      },
+                                                      "type": {
+                                                          "type": "string"
+                                                      }
+                                                  },
+                                                  "required": [
+                                                      "id",
+                                                      "name",
+                                                      "type",
+                                                      "location",
+                                                      "systemData",
+                                                      "properties"
+                                                  ],
+                                                  "type": "object"
+                                              },
+                                              "type": "array"
+                                          }
+                                      },
+                                      "type": "object"
+                                  }
+                              },
+                              "runAfter": {
+                                  "Get_Central_Instances_of_the_VIS": [
+                                      "Succeeded"
+                                  ]
+                              },
+                              "type": "ParseJson"
                           }
-                        },
-                        "expression": {
-                          "and": [
-                            {
-                              "equals": [
-                                "@parameters('IncludeDatabaseOperations')",
-                                true
-                              ]
-                            }
-                          ]
-                        },
-                        "runAfter": {
-                          "Initiate_VIS_resource_stop": ["Succeeded"]
-                        },
-                        "type": "If"
                       },
-                      "Initiate_VIS_resource_stop": {
-                        "inputs": {
-                          "body": {
-                            "softStopTimeoutSeconds": "@parameters('SoftStopTimeout')",
-                            "deallocateVm": "@parameters('IncludeVirtualMachineOperation')"
-                          },
-                          "host": {
-                            "connection": {
-                              "name": "@parameters('$connections')['arm']['connectionId']"
-                            }
-                          },
-                          "method": "post",
-                          "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop'), '/')[8])}/@{encodeURIComponent(parameters('OperationName'))}",
-                          "queries": {
-                            "x-ms-api-version": "2023-10-01-preview"
+                      "foreach": "@parameters('ResourceName')",
+                      "runtimeConfiguration": {
+                          "concurrency": {
+                              "repetitions": 20
                           }
-                        },
-                        "runAfter": {},
-                        "type": "ApiConnection"
-                      }
-                    },
-                    "foreach": "@parameters('ResourceName')",
-                    "runAfter": {},
-                    "type": "Foreach",
-                    "runtimeConfiguration": "[if(equals(parameters('OperationExecution'), 'true'), variables('sequentialOperations'), variables('concurrentOperations'))]"
+                      },
+                      "type": "Foreach"
                   }
-                }
+              },
+              "else": {
+                  "actions": {}
               },
               "expression": {
-                "and": [
-                  {
-                    "equals": ["@parameters('OperationName')", "start"]
+                  "and": [
+                      {
+                          "equals": [
+                              "@parameters('IncludeVirtualMachineOperation')",
+                              true
+                          ]
+                      },
+                      {
+                          "equals": [
+                              "@parameters('OperationName')",
+                              "stop"
+                          ]
+                      }
+                  ]
+              },
+              "runAfter": {
+                  "SAP_operation_type": [
+                      "Succeeded"
+                  ]
+              },
+              "type": "If"
+          },
+          "SAP_operation_type": {
+              "actions": {
+                  "For_each_VIS_resource_start": {
+                      "actions": {
+                          "Database_start_operation": {
+                              "actions": {
+                                  "For_each_DB_instance_start": {
+                                      "actions": {
+                                          "Initiate_database_instance_start": {
+                                              "inputs": {
+                                                  "body": {
+                                                      "startVm": "@parameters('IncludeVirtualMachineOperation')"
+                                                  },
+                                                  "host": {
+                                                      "connection": {
+                                                          "name": "@parameters('$connections')['arm']['connectionId']"
+                                                      }
+                                                  },
+                                                  "method": "post",
+                                                  "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_start'), '/')[8],'/databaseinstances/',items('For_each_DB_instance_start')?['name'])}/@{encodeURIComponent(parameters('OperationName'))}",
+                                                  "queries": {
+                                                      "x-ms-api-version": "2023-10-01-preview"
+                                                  }
+                                              },
+                                              "type": "ApiConnection"
+                                          }
+                                      },
+                                      "foreach": "@body('Parse_database_instance_start_operation_response')?['value']",
+                                      "runAfter": {
+                                          "Parse_database_instance_start_operation_response": [
+                                              "Succeeded"
+                                          ]
+                                      },
+                                      "type": "Foreach"
+                                  },
+                                  "Parse_database_instance_start_operation_response": {
+                                      "inputs": {
+                                          "content": "@body('Read_database_instance_start_operation_response')",
+                                          "schema": {
+                                              "properties": {
+                                                  "value": {
+                                                      "items": {
+                                                          "properties": {
+                                                              "id": {
+                                                                  "type": "string"
+                                                              },
+                                                              "location": {
+                                                                  "type": "string"
+                                                              },
+                                                              "name": {
+                                                                  "type": "string"
+                                                              },
+                                                              "properties": {
+                                                                  "properties": {
+                                                                      "databaseSid": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "databaseType": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "ipAddress": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "loadBalancerDetails": {
+                                                                          "properties": {
+                                                                              "id": {
+                                                                                  "type": "string"
+                                                                              }
+                                                                          },
+                                                                          "type": "object"
+                                                                      },
+                                                                      "provisioningState": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "status": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "subnet": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "vmDetails": {
+                                                                          "items": {
+                                                                              "properties": {
+                                                                                  "status": {
+                                                                                      "type": "string"
+                                                                                  },
+                                                                                  "virtualMachineId": {
+                                                                                      "type": "string"
+                                                                                  }
+                                                                              },
+                                                                              "required": [
+                                                                                  "virtualMachineId",
+                                                                                  "status"
+                                                                              ],
+                                                                              "type": "object"
+                                                                          },
+                                                                          "type": "array"
+                                                                      }
+                                                                  },
+                                                                  "type": "object"
+                                                              },
+                                                              "systemData": {
+                                                                  "properties": {
+                                                                      "createdAt": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "createdBy": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "createdByType": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "lastModifiedAt": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "lastModifiedBy": {
+                                                                          "type": "string"
+                                                                      },
+                                                                      "lastModifiedByType": {
+                                                                          "type": "string"
+                                                                      }
+                                                                  },
+                                                                  "type": "object"
+                                                              },
+                                                              "tags": {
+                                                                  "type": "object"
+                                                              },
+                                                              "type": {
+                                                                  "type": "string"
+                                                              }
+                                                          },
+                                                          "required": [
+                                                              "id",
+                                                              "name",
+                                                              "type",
+                                                              "location",
+                                                              "systemData",
+                                                              "properties"
+                                                          ],
+                                                          "type": "object"
+                                                      },
+                                                      "type": "array"
+                                                  }
+                                              },
+                                              "type": "object"
+                                          }
+                                      },
+                                      "runAfter": {
+                                          "Read_database_instance_start_operation_response": [
+                                              "Succeeded"
+                                          ]
+                                      },
+                                      "type": "ParseJson"
+                                  },
+                                  "Read_database_instance_start_operation_response": {
+                                      "inputs": {
+                                          "host": {
+                                              "connection": {
+                                                  "name": "@parameters('$connections')['arm']['connectionId']"
+                                              }
+                                          },
+                                          "method": "get",
+                                          "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_start'), '/')[8],'/databaseInstances')}",
+                                          "queries": {
+                                              "x-ms-api-version": "2023-10-01-preview"
+                                          }
+                                      },
+                                      "type": "ApiConnection"
+                                  }
+                              },
+                              "else": {
+                                  "actions": {}
+                              },
+                              "expression": {
+                                  "and": [
+                                      {
+                                          "equals": [
+                                              "@parameters('IncludeDatabaseOperations')",
+                                              true
+                                          ]
+                                      }
+                                  ]
+                              },
+                              "type": "If"
+                          },
+                          "Initiate_VIS_resource_start": {
+                              "inputs": {
+                                  "body": {
+                                      "startVm": "@parameters('IncludeVirtualMachineOperation')"
+                                  },
+                                  "host": {
+                                      "connection": {
+                                          "name": "@parameters('$connections')['arm']['connectionId']"
+                                      }
+                                  },
+                                  "method": "post",
+                                  "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_start'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_start'), '/')[8])}/@{encodeURIComponent(parameters('OperationName'))}",
+                                  "queries": {
+                                      "x-ms-api-version": "2023-10-01-preview"
+                                  }
+                              },
+                              "runAfter": {
+                                  "Database_start_operation": [
+                                      "Succeeded"
+                                  ]
+                              },
+                              "type": "ApiConnection"
+                          }
+                      },
+                      "foreach": "@parameters('ResourceName')",
+                      "runtimeConfiguration": {
+                          "concurrency": {
+                              "repetitions": 1
+                          }
+                      },
+                      "type": "Foreach"
                   }
-                ]
+              },
+              "else": {
+                  "actions": {
+                      "For_each_VIS_resource_stop": {
+                          "actions": {
+                              "Database_stop_operation": {
+                                  "actions": {
+                                      "For_each_DB_instance_stop": {
+                                          "actions": {
+                                              "Initiate_database_instance_stop": {
+                                                  "inputs": {
+                                                      "body": {
+                                                          "softStopTimeoutSeconds": "@parameters('SoftStopTimeout')"
+                                                      },
+                                                      "host": {
+                                                          "connection": {
+                                                              "name": "@parameters('$connections')['arm']['connectionId']"
+                                                          }
+                                                      },
+                                                      "method": "post",
+                                                      "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop'), '/')[8],'/databaseinstances/',items('For_each_DB_instance_stop')?['name'])}/@{encodeURIComponent(parameters('OperationName'))}",
+                                                      "queries": {
+                                                          "x-ms-api-version": "2023-10-01-preview"
+                                                      }
+                                                  },
+                                                  "type": "ApiConnection"
+                                              }
+                                          },
+                                          "foreach": "@body('Parse_database_instance_stop_operation_response')?['value']",
+                                          "runAfter": {
+                                              "Parse_database_instance_stop_operation_response": [
+                                                  "Succeeded"
+                                              ]
+                                          },
+                                          "type": "Foreach"
+                                      },
+                                      "Parse_database_instance_stop_operation_response": {
+                                          "inputs": {
+                                              "content": "@body('Read_database_instance_stop_operation_response')",
+                                              "schema": {
+                                                  "properties": {
+                                                      "value": {
+                                                          "items": {
+                                                              "properties": {
+                                                                  "id": {
+                                                                      "type": "string"
+                                                                  },
+                                                                  "location": {
+                                                                      "type": "string"
+                                                                  },
+                                                                  "name": {
+                                                                      "type": "string"
+                                                                  },
+                                                                  "properties": {
+                                                                      "properties": {
+                                                                          "databaseSid": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "databaseType": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "ipAddress": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "loadBalancerDetails": {
+                                                                              "properties": {
+                                                                                  "id": {
+                                                                                      "type": "string"
+                                                                                  }
+                                                                              },
+                                                                              "type": "object"
+                                                                          },
+                                                                          "provisioningState": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "status": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "subnet": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "vmDetails": {
+                                                                              "items": {
+                                                                                  "properties": {
+                                                                                      "status": {
+                                                                                          "type": "string"
+                                                                                      },
+                                                                                      "virtualMachineId": {
+                                                                                          "type": "string"
+                                                                                      }
+                                                                                  },
+                                                                                  "required": [
+                                                                                      "virtualMachineId",
+                                                                                      "status"
+                                                                                  ],
+                                                                                  "type": "object"
+                                                                              },
+                                                                              "type": "array"
+                                                                          }
+                                                                      },
+                                                                      "type": "object"
+                                                                  },
+                                                                  "systemData": {
+                                                                      "properties": {
+                                                                          "createdAt": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "createdBy": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "createdByType": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "lastModifiedAt": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "lastModifiedBy": {
+                                                                              "type": "string"
+                                                                          },
+                                                                          "lastModifiedByType": {
+                                                                              "type": "string"
+                                                                          }
+                                                                      },
+                                                                      "type": "object"
+                                                                  },
+                                                                  "tags": {
+                                                                      "type": "object"
+                                                                  },
+                                                                  "type": {
+                                                                      "type": "string"
+                                                                  }
+                                                              },
+                                                              "required": [
+                                                                  "id",
+                                                                  "name",
+                                                                  "type",
+                                                                  "location",
+                                                                  "systemData",
+                                                                  "properties"
+                                                              ],
+                                                              "type": "object"
+                                                          },
+                                                          "type": "array"
+                                                      }
+                                                  },
+                                                  "type": "object"
+                                              }
+                                          },
+                                          "runAfter": {
+                                              "Read_database_instance_stop_operation_response": [
+                                                  "Succeeded"
+                                              ]
+                                          },
+                                          "type": "ParseJson"
+                                      },
+                                      "Read_database_instance_stop_operation_response": {
+                                          "inputs": {
+                                              "host": {
+                                                  "connection": {
+                                                      "name": "@parameters('$connections')['arm']['connectionId']"
+                                                  }
+                                              },
+                                              "method": "get",
+                                              "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop'), '/')[8],'/databaseInstances')}",
+                                              "queries": {
+                                                  "x-ms-api-version": "2023-10-01-preview"
+                                              }
+                                          },
+                                          "type": "ApiConnection"
+                                      }
+                                  },
+                                  "else": {
+                                      "actions": {}
+                                  },
+                                  "expression": {
+                                      "and": [
+                                          {
+                                              "equals": [
+                                                  "@parameters('IncludeDatabaseOperations')",
+                                                  true
+                                              ]
+                                          }
+                                      ]
+                                  },
+                                  "runAfter": {
+                                      "Initiate_VIS_resource_stop": [
+                                          "Succeeded"
+                                      ]
+                                  },
+                                  "type": "If"
+                              },
+                              "Initiate_VIS_resource_stop": {
+                                  "inputs": {
+                                      "body": {
+                                          "softStopTimeoutSeconds": "@parameters('SoftStopTimeout')"
+                                      },
+                                      "host": {
+                                          "connection": {
+                                              "name": "@parameters('$connections')['arm']['connectionId']"
+                                          }
+                                      },
+                                      "method": "post",
+                                      "path": "/subscriptions/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[2])}/resourcegroups/@{encodeURIComponent(split(items('For_each_VIS_resource_stop'), '/')[4])}/providers/@{encodeURIComponent('Microsoft.Workloads')}/@{encodeURIComponent('sapVirtualInstances/',split(items('For_each_VIS_resource_stop'), '/')[8])}/@{encodeURIComponent(parameters('OperationName'))}",
+                                      "queries": {
+                                          "x-ms-api-version": "2023-10-01-preview"
+                                      }
+                                  },
+                                  "type": "ApiConnection"
+                              }
+                          },
+                          "foreach": "@parameters('ResourceName')",
+                          "runtimeConfiguration": {
+                              "concurrency": {
+                                  "repetitions": 20
+                              }
+                          },
+                          "type": "Foreach"
+                      }
+                  }
+              },
+              "expression": {
+                  "and": [
+                      {
+                          "equals": [
+                              "@parameters('OperationName')",
+                              "start"
+                          ]
+                      }
+                  ]
               },
               "runAfter": {},
               "type": "If"
-            }
-          },
-          "outputs": {}
-        },
-        "parameters": {
+          }
+      },
+      "contentVersion": "1.0.0.0",
+      "outputs": {},
+      "parameters": {
           "$connections": {
-            "value": {
+              "defaultValue": {},
+              "type": "Object"
+          },
+          "IncludeDatabaseOperations": {
+              "defaultValue": true,
+              "type": "Bool"
+          },
+          "IncludeVirtualMachineOperation": {
+              "defaultValue": true,
+              "type": "Bool"
+          },
+          "OperationName": {
+              "defaultValue": "stop",
+              "type": "String"
+          },
+          "ResourceName": {
+              "defaultValue": [
+                  "/subscriptions/7235b861-9c47-4957-8841-e5f0b305a68a/resourceGroups/Adhoc-Prod-E2E-SVI-02Jul-266f-avset-sles-sap-12-sp5-gen2/providers/Microsoft.Workloads/sapVirtualInstances/R45"
+              ],
+              "type": "Array"
+          },
+          "SoftStopTimeout": {
+              "defaultValue": 0,
+              "type": "Int"
+          }
+      },
+      "triggers": {
+          "Recurrence": {
+              "evaluatedRecurrence": {
+                  "frequency": "Day",
+                  "interval": 1,
+                  "schedule": {
+                      "hours": [
+                          22,
+                          0,
+                          2,
+                          4,
+                          6,
+                          8,
+                          10,
+                          "12",
+                          "14",
+                          "16",
+                          "18",
+                          "20"
+                      ],
+                      "minutes": [
+                          "0"
+                      ]
+                  },
+                  "startTime": "2024-07-18T16:31:06.581Z",
+                  "timeZone": "India Standard Time"
+              },
+              "recurrence": {
+                  "frequency": "Day",
+                  "interval": 1,
+                  "schedule": {
+                      "hours": [
+                          22,
+                          0,
+                          2,
+                          4,
+                          6,
+                          8,
+                          10,
+                          "12",
+                          "14",
+                          "16",
+                          "18",
+                          "20"
+                      ],
+                      "minutes": [
+                          "0"
+                      ]
+                  },
+                  "startTime": "2024-07-18T16:31:06.581Z",
+                  "timeZone": "India Standard Time"
+              },
+              "type": "Recurrence"
+          }
+      }
+  },
+  "parameters": {
+      "$connections": {
+          "value": {
               "arm": {
-                "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'arm')]",
-                "connectionId": "[resourceId('Microsoft.Web/connections', variables('armConnectionName'))]",
-                "connectionProperties": {
-                  "authentication": {
-                    "type": "ManagedServiceIdentity",
-                    "identity": "[parameters('ManagedIdentityId')]"
-                  }
-                },
-                "connectionName": "variables('armConnectionName')"
+                  "connectionId": "/subscriptions/49d64d54-e966-4c46-a868-1999802b762c/resourceGroups/ayushi-test-rg/providers/Microsoft.Web/connections/sapops-arm-fwfphixwuuznu",
+                  "connectionName": "variables('armConnectionName')",
+                  "connectionProperties": {
+                      "authentication": {
+                          "identity": "/subscriptions/49d64d54-e966-4c46-a868-1999802b762c/resourceGroups/SAP-E2ETest-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/E2E-RBAC-MSI",
+                          "type": "ManagedServiceIdentity"
+                      }
+                  },
+                  "id": "/subscriptions/49d64d54-e966-4c46-a868-1999802b762c/providers/Microsoft.Web/locations/eastus/managedApis/arm"
+              },
+              "azurevm": {
+                  "connectionId": "/subscriptions/49d64d54-e966-4c46-a868-1999802b762c/resourceGroups/ayushi-test-rg/providers/Microsoft.Web/connections/azurevm",
+                  "connectionName": "azurevm",
+                  "id": "/subscriptions/49d64d54-e966-4c46-a868-1999802b762c/providers/Microsoft.Web/locations/eastus/managedApis/azurevm"
               }
-            }
           }
-        }
       }
-    },
-    {
-      "type": "Microsoft.Web/connections",
-      "apiVersion": "2016-06-01",
-      "name": "[variables('armConnectionName')]",
-      "location": "[resourceGroup().location]",
-      "properties": {
-        "api": {
-          "id": "[subscriptionResourceId('Microsoft.Web/locations/managedApis', parameters('location'), 'arm')]"
-        },
-        "displayName": "arm",
-        "parameterValueType": "Alternative"
-      }
-    },
-    {
-      "type": "Microsoft.Insights/activitylogalerts",
-      "apiVersion": "2020-10-01",
-      "name": "[variables('visAlertName')]",
-      "location": "global",
-      "dependsOn": [
-        "[resourceId('microsoft.insights/actionGroups',  variables('actionGroupName'))]"
-      ],
-      "properties": {
-        "scopes": "[parameters('VirtualInstanceForSAPSolutionsResourceID')]",
-        "condition": {
-          "allOf": [
-            {
-              "field": "category",
-              "equals": "Administrative"
-            },
-            {
-              "field": "status",
-              "containsAny": ["failed", "succeeded"]
-            },
-            {
-              "field": "operationName",
-              "equals": "[concat('Microsoft.Workloads/sapVirtualInstances/', parameters('SAPOperationType'), '/action')]"
-            },
-            {
-              "field": "caller",
-              "equals": "[reference(parameters('ManagedIdentityId'), '2023-01-31').principalId]"
-            }
-          ]
-        },
-        "actions": {
-          "actionGroups": [
-            {
-              "actionGroupId": "[resourceId('microsoft.insights/actionGroups',  variables('actionGroupName'))]",
-              "webhookProperties": {}
-            }
-          ]
-        },
-        "enabled": true
-      }
-    },
-    {
-      "type": "Microsoft.Insights/metricAlerts",
-      "apiVersion": "2018-03-01",
-      "name": "[variables('logicAppAlertName')]",
-      "location": "global",
-      "dependsOn": [
-        "[resourceId('microsoft.insights/actionGroups',  variables('actionGroupName'))]",
-        "[resourceId('Microsoft.Logic/workflows',  parameters('LogicAppName'))]"
-      ],
-      "properties": {
-        "severity": 3,
-        "enabled": true,
-        "scopes": [
-          "[resourceId('Microsoft.Logic/workflows',  parameters('LogicAppName'))]"
-        ],
-        "evaluationFrequency": "PT5M",
-        "windowSize": "PT5M",
-        "criteria": {
-          "allOf": [
-            {
-              "threshold": 0,
-              "name": "Metric1",
-              "metricNamespace": "Microsoft.Logic/workflows",
-              "metricName": "ActionsFailed",
-              "operator": "GreaterThan",
-              "timeAggregation": "Total",
-              "skipMetricValidation": false,
-              "criterionType": "StaticThresholdCriterion"
-            }
-          ],
-          "odata.type": "Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria"
-        },
-        "autoMitigate": true,
-        "targetResourceType": "Microsoft.Logic/workflows",
-        "targetResourceRegion": "[parameters('location')]",
-        "actions": [
-          {
-            "actionGroupId": "[resourceId('microsoft.insights/actionGroups',  variables('actionGroupName'))]",
-            "webHookProperties": {}
-          }
-        ]
-      }
-    },
-    {
-      "type": "microsoft.insights/actionGroups",
-      "apiVersion": "2023-01-01",
-      "name": "[variables('actionGroupName')]",
-      "location": "Global",
-      "properties": {
-        "groupShortName": "actionGroup",
-        "enabled": true,
-        "emailReceivers": [],
-        "smsReceivers": [],
-        "webhookReceivers": [],
-        "eventHubReceivers": [],
-        "itsmReceivers": [],
-        "azureAppPushReceivers": [],
-        "automationRunbookReceivers": [],
-        "voiceReceivers": [],
-        "logicAppReceivers": [],
-        "azureFunctionReceivers": [],
-        "armRoleReceivers": []
-      }
-    }
-  ]
+  }
 }
